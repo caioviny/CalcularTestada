@@ -1,5 +1,5 @@
 """
-Plugin Calcular Testada
+Plugin Calcular Testada - Versão Moderna Integrada
 Calcula as linhas de testada dos lotes em relação às quadras
 """
 from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, Qt, QVariant
@@ -14,7 +14,11 @@ from qgis.core import (
 )
 import processing
 import os.path
+
+# Importa os novos módulos
 from .Calcular_Testada_dialog import CalcularTestadaDialog
+from .services.mapToolSelectedQuadra import MapToolSelectQuadra
+
 
 class CalcularTestada:
     """Plugin principal"""
@@ -23,6 +27,7 @@ class CalcularTestada:
         self.iface = iface
         self.plugin_dir = os.path.dirname(__file__)
         self.toolbar = None
+        self.map_tool = None  # Armazena a ferramenta de seleção
 
         locale = QSettings().value('locale/userLocale')[0:2]
         locale_path = os.path.join(
@@ -33,6 +38,7 @@ class CalcularTestada:
             self.translator = QTranslator()
             self.translator.load(locale_path)
             QCoreApplication.installTranslator(self.translator)
+        
         self.actions = []
         self.menu = self.tr(u'&Calcular Testada')
         self.first_start = None
@@ -52,10 +58,12 @@ class CalcularTestada:
         status_tip=None,
         whats_this=None,
         parent=None):
+        
         icon = QIcon(icon_path)
         action = QAction(icon, text, parent)
         action.triggered.connect(callback)
         action.setEnabled(enabled_flag)
+        
         if status_tip is not None:
             action.setStatusTip(status_tip)
         if whats_this is not None:
@@ -63,48 +71,125 @@ class CalcularTestada:
         if add_to_toolbar:
             self.toolbar.addAction(action)
         if add_to_menu:
-            self.iface.addPluginToMenu(
-                self.menu,
-                action)
+            self.iface.addPluginToMenu(self.menu, action)
+        
         self.actions.append(action)
         return action
 
     def initGui(self):
+        """Inicializa a interface gráfica"""
         icon_path = os.path.join(self.plugin_dir, 'icon.png')
+        
         # Procurar pelo toolbar UMCGEO existente
         self.toolbar = None
         for toolbar in self.iface.mainWindow().findChildren(QToolBar):
             if toolbar.objectName() == 'UMCGEO' or toolbar.windowTitle() == 'UMCGEO':
                 self.toolbar = toolbar
                 break
+        
         # Se não encontrar, criar um novo toolbar
         if self.toolbar is None:
             self.toolbar = self.iface.addToolBar('UMCGEO')
             self.toolbar.setObjectName('UMCGEO')
 
-        icon_path = os.path.join(self.plugin_dir, "icon.png")
-       
         self.add_action(
             icon_path,
             text=self.tr(u'Calcular Testada'),
             callback=self.run,
             parent=self.iface.mainWindow()
         )
+        
         self.first_start = True
 
     def unload(self):
+        """Remove o plugin e limpa recursos"""
         for action in self.actions:
             self.iface.removePluginVectorMenu(self.menu, action)
             if self.toolbar:
                 self.toolbar.removeAction(action)
+        
+        # Desativa a ferramenta de seleção se estiver ativa
+        if self.map_tool:
+            self.iface.mapCanvas().unsetMapTool(self.map_tool)
+            self.map_tool = None
 
     def run(self):
+        """Executa o plugin"""
         if self.first_start:
             self.first_start = False
             self.dlg = CalcularTestadaDialog()
+            
+            # Conecta os botões
             self.dlg.btnExecutar.clicked.connect(self.executar_processamento)
+            self.dlg.btnSelecionar.clicked.connect(self.ativar_selecao_quadra)
+        
+        # Atualiza o status da seleção ao abrir o diálogo
+        self.atualizar_status_selecao()
+        
         self.dlg.show()
         result = self.dlg.exec_()
+
+    def ativar_selecao_quadra(self):
+        """Ativa a ferramenta de seleção de quadras no mapa"""
+        # Verifica se a camada Quadra existe
+        quadra_layers = QgsProject.instance().mapLayersByName('Quadra')
+        
+        if not quadra_layers:
+            QMessageBox.warning(
+                self.dlg,
+                "Aviso",
+                "Camada 'Quadra' não encontrada no projeto!\n\n"
+                "Certifique-se de que a camada 'Quadra' está carregada."
+            )
+            return
+        
+        quadra_layer = quadra_layers[0]
+        
+        # Fecha o diálogo temporariamente
+        self.dlg.hide()
+        
+        # Cria e ativa a ferramenta de seleção
+        self.map_tool = MapToolSelectQuadra(
+            self.iface.mapCanvas(),
+            quadra_layer,
+            self.atualizar_status_selecao,
+            self
+        )
+        
+        self.iface.mapCanvas().setMapTool(self.map_tool)
+        
+        # Mensagem informativa
+        self.iface.messageBar().pushMessage(
+            "Modo de Seleção Ativado",
+            "🎯 Clique na quadra desejada no mapa. Pressione ENTER para confirmar ou ESC para cancelar.",
+            level=0,
+            duration=5
+        )
+
+    def confirmar_selecao_e_reabrir_dialogo(self):
+        """Confirma a seleção e reabre o diálogo"""
+        # Desativa a ferramenta
+        if self.map_tool:
+            self.iface.mapCanvas().unsetMapTool(self.map_tool)
+        
+        # Atualiza o status
+        self.atualizar_status_selecao()
+        
+        # Reabre o diálogo
+        self.dlg.show()
+
+    def atualizar_status_selecao(self):
+        """Atualiza o status da seleção no diálogo"""
+        if not self.dlg:
+            return
+        
+        quadra_layers = QgsProject.instance().mapLayersByName('Quadra')
+        
+        if quadra_layers:
+            num_selecionadas = quadra_layers[0].selectedFeatureCount()
+            self.dlg.atualizar_status_selecao(num_selecionadas)
+        else:
+            self.dlg.atualizar_status_selecao(0)
 
     def executar_processamento(self):
         """Executa o processamento principal"""
@@ -126,15 +211,25 @@ class CalcularTestada:
                 QMessageBox.warning(
                     self.dlg,
                     "Aviso",
-                    "Selecione uma quadra antes de executar!"
+                    "Selecione uma quadra antes de executar!\n\n"
+                    "Use o botão 'Selecionar Quadra no Mapa'."
                 )
                 return
 
             # Obter parâmetros
             ponto_cardeal = self.dlg.comboPontoCardeal.currentIndex()
 
-            # Executar processamento
-            self.processar_testada(conexao, ponto_cardeal)
+            # Confirma execução
+            resposta = QMessageBox.question(
+                self.dlg,
+                "Confirmar Processamento",
+                f"Deseja processar {quadra_layer[0].selectedFeatureCount()} quadra(s) selecionada(s)?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            
+            if resposta == QMessageBox.Yes:
+                # Executa o processamento
+                self.processar_testada(conexao, ponto_cardeal)
 
         except Exception as e:
             QMessageBox.critical(
@@ -309,7 +404,8 @@ class CalcularTestada:
                 "Erro",
                 f"Erro durante o processamento:\n{str(e)}"
             )
-
+    # ... (Resto dos métodos auxiliares como processar_geometrias, 
+    # editar_campos_lote, etc - mantidos do código original)
     def conectar_feicoes_integrado(self, input_layer, tolerance=0.01, feedback=None):
         """
         Conecta feições adjacentes garantindo perfeita conectividade topológica
@@ -389,7 +485,7 @@ class CalcularTestada:
         feedback.pushInfo('Conectividade corrigida com sucesso!')
         
         return {'OUTPUT': output_layer}
-
+    
     def gerar_linhas_testada_integrado(self, input_layer, tolerance=0.01, feedback=None):
         """
         Gera linhas de testada dos lotes (implementação integrada do lftools:frontlotline)
@@ -609,7 +705,7 @@ class CalcularTestada:
         feedback.pushInfo('Linhas de testada geradas com sucesso!')
         
         return {'OUTPUT': output_layer}
-
+    
     def orientar_poligono(self, coords, primeiro=1, sentido=0):
         """
         Orienta o polígono baseado no ponto cardeal e sentido
@@ -658,6 +754,7 @@ class CalcularTestada:
             area += coords[i].x() * coords[j].y()
             area -= coords[j].x() * coords[i].y()
         return area / 2.0
+
 
     def processar_geometrias(self, outputs, feedback):
         """Processa as geometrias (simplificação, correção, etc)"""
@@ -755,7 +852,7 @@ class CalcularTestada:
         feedback.setCurrentStep(11)
 
         return outputs
-
+    
     def editar_campos_lote(self, outputs, feedback):
         """Edita os campos da camada de lotes"""
 
@@ -792,7 +889,7 @@ class CalcularTestada:
         }
 
         return processing.run('native:refactorfields', alg_params, feedback=feedback)
-
+    
     def editar_campos_linhas(self, outputs, feedback):
         """Edita os campos da camada de linhas de testada"""
 
@@ -823,6 +920,7 @@ class CalcularTestada:
 
         return processing.run('native:refactorfields', alg_params, feedback=feedback)
 
+
     def calcular_angulo_rotacao(self, ponto_cardeal, inverter=False):
         """Calcula o ângulo de rotação baseado no ponto cardeal"""
 
@@ -852,3 +950,4 @@ class CalcularTestada:
             return angulos.get(ponto_cardeal, 0)
         else:
             return angulos_inversos.get(ponto_cardeal, 0)
+           
